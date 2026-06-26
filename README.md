@@ -4,7 +4,7 @@
 // ==UserScript==
 // @name         B站链接去跟踪参数
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  移除首页跳转、视频页、空间页链接参数
 // @author       FuckBiliLink
 // @match        *://*.bilibili.com/*
@@ -22,20 +22,53 @@
                           'from',
                           'msource',
                           'bsource',
-                          'spmid'];
+                          'spmid',
+                          'trackid'];
 
     // 移除URL中的参数
     function cleanUrl(rawUrl) {
         if (!rawUrl) return rawUrl;
         try {
             const url = new URL(rawUrl, location.origin);
-            if (url.pathname.startsWith('/video/') && url.search) {
-                url.search = '';
-                return url.toString();
+            if (url.hostname.includes('bilibili.com')) {
+                if (url.pathname.startsWith('/video/')) {
+                    let hasBlockParam = BLOCK_PARAMS.some(param => url.searchParams.has(param));
+                    if (hasBlockParam) {
+                        BLOCK_PARAMS.forEach(param => url.searchParams.delete(param));
+                        if (!url.searchParams.toString()) {
+                            url.search = '';
+                        }
+                        return url.toString();
+                    }
+                } else if (url.hostname.startsWith('space.')) {
+                    let hasBlockParam = BLOCK_PARAMS.some(param => url.searchParams.has(param));
+                    if (hasBlockParam) {
+                        BLOCK_PARAMS.forEach(param => url.searchParams.delete(param));
+                        return url.toString();
+                    }
+                }
             }
         } catch (e) {}
         return rawUrl;
     }
+
+    // 拦截 <a> 标签的 href 属性赋值行为，彻底解决异步框架回写问题
+    try {
+        const originalHrefGet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href').get;
+        const originalHrefSet = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href').set;
+
+        Object.defineProperty(HTMLAnchorElement.prototype, 'href', {
+            get: function() {
+                return originalHrefGet.call(this);
+            },
+            set: function(val) {
+                const cleaned = cleanUrl(val);
+                originalHrefSet.call(this, cleaned);
+            },
+            configurable: true,
+            enumerable: true
+        });
+    } catch (e) {}
 
     // 移除当前地址栏参数 (针对视频页应用黑名单)
     function cleanCurrentUrl() {
@@ -78,45 +111,54 @@
     document.addEventListener('DOMContentLoaded', cleanCurrentUrl);
     window.addEventListener('load', cleanCurrentUrl);
 
-    // 净化单个 <a> 标签并克隆以解绑已有事件
+    // 净化单个 <a> 标签
     function sanitizeAnchor(anchor) {
-        if (!anchor.href || anchor.dataset.cleaned) return;
+        if (!anchor.href) return;
 
         try {
-            const url = new URL(anchor.href);
-            if (url.hostname.includes('bilibili.com') && url.pathname.startsWith('/video/')) {
-                url.search = '';
+            const currentHref = anchor.href;
+            const cleanedHref = cleanUrl(currentHref);
 
-                const clonedAnchor = anchor.cloneNode(true);
-                clonedAnchor.href = url.toString();
-                clonedAnchor.dataset.cleaned = 'true';
-                clonedAnchor.rel = 'noreferrer';
-
-                clonedAnchor.removeAttribute('data-spmid');
-                clonedAnchor.removeAttribute('data-mod');
-                clonedAnchor.removeAttribute('data-idx');
-
-                if (anchor.parentNode) {
-                    anchor.parentNode.replaceChild(clonedAnchor, anchor);
-                }
+            if (currentHref !== cleanedHref) {
+                anchor.href = cleanedHref;
+                anchor.rel = 'noreferrer';
+                anchor.removeAttribute('data-spmid');
+                anchor.removeAttribute('data-mod');
+                anchor.removeAttribute('data-idx');
             }
         } catch (e) {}
     }
 
-    // 监听动态添加的视频卡片
+    // 处理选定范围内的所有a标签
+    function processAnchors(container) {
+        const root = container || document;
+        const anchors = root.querySelectorAll('a[href*="/video/"], a[href*="space.bilibili.com"]');
+        anchors.forEach(sanitizeAnchor);
+    }
+
+    // 监听动态添加的视频卡片与UP主主页链接
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             if (mutation.addedNodes.length) {
-                const anchors = document.querySelectorAll('a.bili-video-card__image--link, .bili-video-card__info--tit a');
-                anchors.forEach(sanitizeAnchor);
+                mutation.addedNodes.forEach(node => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        processAnchors(node);
+                    }
+                });
+            } else if (mutation.type === 'attributes' && mutation.attributeName === 'href') {
+                sanitizeAnchor(mutation.target);
             }
         }
     });
 
     window.addEventListener('DOMContentLoaded', () => {
-        const anchors = document.querySelectorAll('a.bili-video-card__image--link, .bili-video-card__info--tit a');
-        anchors.forEach(sanitizeAnchor);
-        observer.observe(document.body, { childList: true, subtree: true });
+        processAnchors(document.body);
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href']
+        });
     });
 })();
 ```
